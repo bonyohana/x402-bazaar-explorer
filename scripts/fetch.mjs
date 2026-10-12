@@ -21,15 +21,20 @@ function retryAfterMs(res) {
 // Exponential backoff with full jitter, capped so one page can't stall the run.
 const backoffMs = (attempt) => Math.random() * Math.min(BACKOFF_CAP_MS, 1000 * 2 ** attempt);
 
+// Shared across workers: a 429 on one page pauses every worker until this time.
+let resumeAt = 0;
+
 async function getPage(offset) {
   const url = `${API}?limit=${PAGE_SIZE}&offset=${offset}`;
   let lastError;
   for (let attempt = 0; attempt <= RETRIES; attempt++) {
     let wait = 0;
+    if (resumeAt > Date.now()) await sleep(resumeAt - Date.now());
     try {
       const res = await fetch(url, { headers: { accept: "application/json" } });
       if (res.status === 429 || res.status >= 500) {
         wait = Math.min(BACKOFF_CAP_MS, retryAfterMs(res));
+        if (res.status === 429) resumeAt = Math.max(resumeAt, Date.now() + wait);
         throw new Error(`HTTP ${res.status}`);
       }
       if (!res.ok) throw new Error(`HTTP ${res.status} ${await res.text()}`);
