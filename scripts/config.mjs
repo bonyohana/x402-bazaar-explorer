@@ -3,7 +3,8 @@
 export const API = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources";
 export const PAGE_SIZE = 100;
 export const CONCURRENCY = 8;
-export const RETRIES = 4;
+export const RETRIES = 7;
+export const BACKOFF_CAP_MS = 30_000;
 
 export const RAW_DIR = ".cache";
 export const RAW_FILE = ".cache/registry.jsonl";

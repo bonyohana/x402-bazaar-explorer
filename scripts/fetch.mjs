@@ -4,22 +4,39 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { API, PAGE_SIZE, CONCURRENCY, RETRIES, RAW_DIR, RAW_FILE } from "./config.mjs";
+import { API, PAGE_SIZE, CONCURRENCY, RETRIES, BACKOFF_CAP_MS, RAW_DIR, RAW_FILE } from "./config.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Retry-After may be delta-seconds or an HTTP date; returns ms, or 0 if absent/unparseable.
+function retryAfterMs(res) {
+  const h = res.headers.get("retry-after");
+  if (!h) return 0;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(h);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+
+// Exponential backoff with full jitter, capped so one page can't stall the run.
+const backoffMs = (attempt) => Math.random() * Math.min(BACKOFF_CAP_MS, 1000 * 2 ** attempt);
 
 async function getPage(offset) {
   const url = `${API}?limit=${PAGE_SIZE}&offset=${offset}`;
   let lastError;
   for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    let wait = 0;
     try {
       const res = await fetch(url, { headers: { accept: "application/json" } });
-      if (res.status === 429 || res.status >= 500) throw new Error(`HTTP ${res.status}`);
+      if (res.status === 429 || res.status >= 500) {
+        wait = Math.min(BACKOFF_CAP_MS, retryAfterMs(res));
+        throw new Error(`HTTP ${res.status}`);
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status} ${await res.text()}`);
       return await res.json();
     } catch (err) {
       lastError = err;
-      if (attempt < RETRIES) await sleep(400 * 2 ** attempt);
+      if (attempt < RETRIES) await sleep(Math.max(wait, backoffMs(attempt)));
     }
   }
   throw new Error(`offset ${offset} failed after ${RETRIES + 1} attempts: ${lastError.message}`);
