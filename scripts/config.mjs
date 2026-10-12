@@ -5,6 +5,8 @@ export const PAGE_SIZE = 100;
 export const CONCURRENCY = 8;
 export const RETRIES = 7;
 export const BACKOFF_CAP_MS = 30_000;
+// A Retry-After longer than this fails the run rather than retrying early.
+export const MAX_RETRY_AFTER_MS = 300_000;
 
 export const RAW_DIR = ".cache";
 export const RAW_FILE = ".cache/registry.jsonl";

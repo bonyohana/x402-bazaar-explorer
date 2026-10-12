@@ -4,7 +4,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { API, PAGE_SIZE, CONCURRENCY, RETRIES, BACKOFF_CAP_MS, RAW_DIR, RAW_FILE } from "./config.mjs";
+import { API, PAGE_SIZE, CONCURRENCY, RETRIES, BACKOFF_CAP_MS, MAX_RETRY_AFTER_MS, RAW_DIR, RAW_FILE } from "./config.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -18,30 +18,43 @@ function retryAfterMs(res) {
   return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
 }
 
-// Exponential backoff with full jitter, capped so one page can't stall the run.
-const backoffMs = (attempt) => Math.random() * Math.min(BACKOFF_CAP_MS, 1000 * 2 ** attempt);
+// Exponential backoff, capped so one page can't stall the run; jitter spreads the restarts.
+const backoffMs = (attempt) => Math.min(BACKOFF_CAP_MS, 1000 * 2 ** attempt);
+const jitterMs = () => Math.random() * 1000;
 
 // Shared across workers: a 429 on one page pauses every worker until this time.
 let resumeAt = 0;
+
+// Re-check after each sleep: another worker's 429 may have pushed the deadline out.
+async function waitForSharedPause() {
+  while (resumeAt > Date.now()) await sleep(resumeAt - Date.now());
+}
 
 async function getPage(offset) {
   const url = `${API}?limit=${PAGE_SIZE}&offset=${offset}`;
   let lastError;
   for (let attempt = 0; attempt <= RETRIES; attempt++) {
     let wait = 0;
-    if (resumeAt > Date.now()) await sleep(resumeAt - Date.now());
+    await waitForSharedPause();
     try {
       const res = await fetch(url, { headers: { accept: "application/json" } });
       if (res.status === 429 || res.status >= 500) {
-        wait = Math.min(BACKOFF_CAP_MS, retryAfterMs(res));
+        const requested = retryAfterMs(res);
+        if (requested > MAX_RETRY_AFTER_MS) {
+          const err = new Error(`HTTP ${res.status}: server asked to wait ${Math.round(requested / 1000)}s`);
+          err.fatal = true;
+          throw err;
+        }
+        wait = requested || backoffMs(attempt);
         if (res.status === 429) resumeAt = Math.max(resumeAt, Date.now() + wait);
         throw new Error(`HTTP ${res.status}`);
       }
       if (!res.ok) throw new Error(`HTTP ${res.status} ${await res.text()}`);
       return await res.json();
     } catch (err) {
+      if (err.fatal) throw new Error(`offset ${offset}: ${err.message}`);
       lastError = err;
-      if (attempt < RETRIES) await sleep(Math.max(wait, backoffMs(attempt)));
+      if (attempt < RETRIES) await sleep((wait || backoffMs(attempt)) + jitterMs());
     }
   }
   throw new Error(`offset ${offset} failed after ${RETRIES + 1} attempts: ${lastError.message}`);
